@@ -14,6 +14,7 @@
 package org.eclipse.hono.tests.http;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.net.HttpURLConnection;
 import java.nio.charset.StandardCharsets;
@@ -33,10 +34,10 @@ import java.util.stream.Stream;
 
 import javax.security.auth.x500.X500Principal;
 
-import org.apache.qpid.proton.message.Message;
 import org.eclipse.hono.application.client.DownstreamMessage;
 import org.eclipse.hono.application.client.MessageConsumer;
-import org.eclipse.hono.application.client.amqp.AmqpMessageContext;
+import org.eclipse.hono.application.client.MessageContext;
+import org.eclipse.hono.application.client.amqp.AmqpApplicationClient;
 import org.eclipse.hono.service.management.device.Device;
 import org.eclipse.hono.service.management.tenant.Tenant;
 import org.eclipse.hono.service.metric.MetricsTags;
@@ -49,7 +50,6 @@ import org.eclipse.hono.util.Constants;
 import org.eclipse.hono.util.MessageHelper;
 import org.eclipse.hono.util.QoS;
 import org.eclipse.hono.util.RegistryManagementConstants;
-import org.eclipse.hono.util.TimeUntilDisconnectNotification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -247,7 +247,7 @@ public abstract class HttpTestBase {
      */
     protected abstract Future<MessageConsumer> createConsumer(
             String tenantId,
-            Handler<DownstreamMessage<AmqpMessageContext>> messageConsumer);
+            Handler<DownstreamMessage<? extends MessageContext>> messageConsumer);
 
     /**
      * Perform additional checks on a received message.
@@ -258,7 +258,7 @@ public abstract class HttpTestBase {
      * @param msg The message to perform checks on.
      * @throws RuntimeException if any of the checks fail.
      */
-    protected void assertAdditionalMessageProperties(final DownstreamMessage<AmqpMessageContext> msg) {
+    protected void assertAdditionalMessageProperties(final DownstreamMessage<? extends MessageContext> msg) {
         // empty
     }
 
@@ -501,7 +501,7 @@ public abstract class HttpTestBase {
     protected void testUploadMessages(
             final VertxTestContext ctx,
             final String tenantId,
-            final Function<Message, Future<?>> messageConsumer,
+            final Function<DownstreamMessage<? extends MessageContext>, Future<?>> messageConsumer,
             final Function<Integer, Future<HttpResponse<Buffer>>> requestSender) throws InterruptedException {
         testUploadMessages(ctx, tenantId, messageConsumer, requestSender, MESSAGES_TO_SEND, null);
     }
@@ -537,7 +537,7 @@ public abstract class HttpTestBase {
     protected void testUploadMessages(
             final VertxTestContext ctx,
             final String tenantId,
-            final Function<Message, Future<?>> messageConsumer,
+            final Function<DownstreamMessage<? extends MessageContext>, Future<?>> messageConsumer,
             final Function<Integer, Future<HttpResponse<Buffer>>> requestSender,
             final int numberOfMessages,
             final QoS expectedQos) throws InterruptedException {
@@ -550,14 +550,14 @@ public abstract class HttpTestBase {
         final VertxTestContext setup = new VertxTestContext();
 
         createConsumer(tenantId, msg -> {
-            logger.trace("received {}", msg);
+            logger.trace("received {}", msg.getPayload() != null ? msg.getPayload().toString() : null);
             ctx.verify(() -> {
                 IntegrationTestSupport.assertTelemetryMessageProperties(msg, tenantId);
                 assertThat(msg.getQos()).isEqualTo(getExpectedQoS(expectedQos));
                 assertAdditionalMessageProperties(msg);
             });
             Optional.ofNullable(messageConsumer)
-                .map(consumer -> consumer.apply(msg.getMessageContext().getRawMessage()))
+                .map(consumer -> consumer.apply(msg))
                 .orElseGet(() -> Future.succeededFuture())
                 .onComplete(attempt -> {
                     if (attempt.succeeded()) {
@@ -939,9 +939,8 @@ public abstract class HttpTestBase {
         final VertxTestContext setup = new VertxTestContext();
         helper.registry.addDeviceForTenant(tenantId, tenant, deviceId, PWD)
         .compose(ok -> createConsumer(tenantId, msg -> {
-            final var rawMessage = msg.getMessageContext().getRawMessage();
-            logger.trace("received message: {}", rawMessage);
-            TimeUntilDisconnectNotification.fromMessage(rawMessage).ifPresent(notification -> {
+            logger.trace("received message: {}", msg);
+            msg.getTimeUntilDisconnectNotification().ifPresent(notification -> {
                 logger.debug("processing piggy backed message [ttd: {}]", notification.getTtd());
                 ctx.verify(() -> {
                     assertThat(notification.getTenantId()).isEqualTo(tenantId);
@@ -1070,7 +1069,7 @@ public abstract class HttpTestBase {
                 msg -> {
                     // do NOT send a command, but let the HTTP adapter's timer expire
                     logger.trace("received message");
-                    return TimeUntilDisconnectNotification.fromMessage(msg)
+                    return msg.getTimeUntilDisconnectNotification()
                     .map(notification -> {
                         ctx.verify(() -> {
                             assertThat(notification.getTtd()).isEqualTo(2);
@@ -1121,6 +1120,10 @@ public abstract class HttpTestBase {
 
     private void testUploadMessagesWithTtdThatReplyWithCommand(final HttpCommandEndpointConfiguration endpointConfig,
             final Tenant tenant, final VertxTestContext ctx) throws InterruptedException {
+
+        // TODO tests using this helper should be executed for AMQP only until Command and Control for Kafka is implemented
+        assumeTrue(helper.applicationClient instanceof AmqpApplicationClient);
+
         final VertxTestContext setup = new VertxTestContext();
 
         final MultiMap requestHeaders = MultiMap.caseInsensitiveMultiMap()
@@ -1155,7 +1158,7 @@ public abstract class HttpTestBase {
         testUploadMessages(ctx, tenantId,
                 msg -> {
 
-                    return TimeUntilDisconnectNotification.fromMessage(msg)
+                    return msg.getTimeUntilDisconnectNotification()
                             .map(notification -> {
                                 logger.trace("received piggy backed message [ttd: {}]: {}", notification.getTtd(), msg);
                                 ctx.verify(() -> {
@@ -1268,7 +1271,7 @@ public abstract class HttpTestBase {
         final AtomicInteger counter = new AtomicInteger();
         testUploadMessages(ctx, tenantId,
                 msg -> {
-                    return TimeUntilDisconnectNotification.fromMessage(msg)
+                    return msg.getTimeUntilDisconnectNotification()
                             .map(notification -> {
 
                                 logger.trace("received piggy backed message [ttd: {}]: {}", notification.getTtd(), msg);

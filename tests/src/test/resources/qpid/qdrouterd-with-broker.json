@@ -98,8 +98,8 @@
   ["vhost", {
       "hostname": "hono",
       "maxConnections": 500,
-      "maxConnectionsPerUser": 20,
-      "maxConnectionsPerHost": 10,
+      "maxConnectionsPerUser": 2000,
+      "maxConnectionsPerHost": 1000,
       "allowUnknownUser": true,
       "groups": {
         "$default": {

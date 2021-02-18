@@ -52,4 +52,11 @@
   <logger name="org.eclipse.californium.scandium" level="WARN"/>
   <logger name="org.mongodb.driver" level="INFO"/>
 
+  <logger name="org.apache.kafka" level="WARN"/>
+  <logger name="org.apache.kafka.clients.producer.ProducerConfig" level="WARN"/>
+  <logger name="org.apache.kafka.clients.consumer.ConsumerConfig" level="WARN"/>
+  <logger name="io.vertx.kafka" level="WARN"/>
+  <logger name="org.eclipse.hono.client.kafka" level="WARN"/>
+  <logger name="org.eclipse.hono.tests" level="TRACE"/>
+
 </configuration>

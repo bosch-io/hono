@@ -42,14 +42,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.producer.ProducerConfig;
 import org.eclipse.hono.application.client.ApplicationClient;
 import org.eclipse.hono.application.client.DownstreamMessage;
 import org.eclipse.hono.application.client.MessageContext;
+import org.eclipse.hono.application.client.MessageProperties;
 import org.eclipse.hono.application.client.amqp.AmqpApplicationClient;
 import org.eclipse.hono.application.client.amqp.ProtonBasedApplicationClient;
 import org.eclipse.hono.application.client.kafka.KafkaApplicationClient;
+import org.eclipse.hono.application.client.kafka.impl.KafkaApplicationClientImpl;
 import org.eclipse.hono.client.HonoConnection;
 import org.eclipse.hono.client.ServiceInvocationException;
+import org.eclipse.hono.client.kafka.KafkaProducerConfigProperties;
+import org.eclipse.hono.client.kafka.KafkaProducerFactory;
+import org.eclipse.hono.client.kafka.consumer.KafkaConsumerConfigProperties;
 import org.eclipse.hono.config.ClientConfigProperties;
 import org.eclipse.hono.service.management.credentials.Credentials;
 import org.eclipse.hono.service.management.credentials.PasswordCredential;
@@ -60,12 +67,15 @@ import org.eclipse.hono.util.BufferResult;
 import org.eclipse.hono.util.Constants;
 import org.eclipse.hono.util.EventConstants;
 import org.eclipse.hono.util.MessageHelper;
+import org.eclipse.hono.util.MessagingType;
 import org.eclipse.hono.util.Strings;
+import org.eclipse.hono.util.TenantConstants;
 import org.eclipse.hono.util.TimeUntilDisconnectNotification;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
+import io.jsonwebtoken.lang.Maps;
 import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
@@ -484,13 +494,14 @@ public final class IntegrationTestSupport {
     /**
      * A client for connecting to Hono's north bound APIs
      * via the AMQP Messaging Network using the legacy client.
+     * Required as long as Command and Control is AMQP only.
      */
     public IntegrationTestApplicationClientFactory applicationClientFactory;
     /**
      * A client for connecting to Hono's north bound APIs
-     * via the AMQP Messaging Network using the new client.
+     * depending on the configured messaging network.
      */
-    public AmqpApplicationClient amqpApplicationClient;
+    public ApplicationClient<?> applicationClient;
 
     private final Set<String> tenantsToDelete = new HashSet<>();
     private final Map<String, Set<String>> devicesToDelete = new HashMap<>();
@@ -556,6 +567,43 @@ public final class IntegrationTestSupport {
         props.setHostnameVerificationRequired(false);
         props.setSecureProtocols(List.of("TLSv1.3"));
         return props;
+    }
+
+    /**
+     * Creates properties for connecting a consumer to Kafka.
+     *
+     * @return The properties or {@code null} if no connection to Kafka is configured.
+     */
+    public static KafkaConsumerConfigProperties getKafkaConsumerConfig() {
+        if (Strings.isNullOrEmpty(IntegrationTestSupport.DOWNSTREAM_BOOTSTRAP_SERVERS)) {
+            return null;
+        }
+
+        LOGGER.info("Configured to connect to Kafka on {}", IntegrationTestSupport.DOWNSTREAM_BOOTSTRAP_SERVERS);
+        final KafkaConsumerConfigProperties consumerConfig = new KafkaConsumerConfigProperties();
+        consumerConfig.setConsumerConfig(Map.of(
+                ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, IntegrationTestSupport.DOWNSTREAM_BOOTSTRAP_SERVERS,
+                ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest",
+                ConsumerConfig.GROUP_ID_CONFIG, "its-" + UUID.randomUUID()));
+        return consumerConfig;
+    }
+
+    /**
+     * Creates properties for connecting a producer to Kafka.
+     *
+     * @return The properties or {@code null} if no connection to Kafka is configured.
+     */
+    public static KafkaProducerConfigProperties getKafkaProducerConfig() {
+        if (Strings.isNullOrEmpty(IntegrationTestSupport.DOWNSTREAM_BOOTSTRAP_SERVERS)) {
+            return null;
+        }
+
+        LOGGER.info("Configured to connect to Kafka on {}", IntegrationTestSupport.DOWNSTREAM_BOOTSTRAP_SERVERS);
+        final KafkaProducerConfigProperties consumerConfig = new KafkaProducerConfigProperties();
+        consumerConfig.setProducerConfig(Map.of(
+                ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, IntegrationTestSupport.DOWNSTREAM_BOOTSTRAP_SERVERS)
+        );
+        return consumerConfig;
     }
 
     /**
@@ -678,15 +726,19 @@ public final class IntegrationTestSupport {
     }
 
     /**
-     * Connects to the AMQP 1.0 Messaging Network.
+     * Connects to the messaging network, i.e. Kafka if configured, AMQP otherwise.
      * <p>
      * Also creates an HTTP client for accessing the Device Registry.
      *
      * @return A future indicating the outcome of the operation.
      */
     public Future<?> init() {
-
-        return init(getMessagingNetworkProperties());
+        final KafkaConsumerConfigProperties kafkaProperties = getKafkaConsumerConfig();
+        if (kafkaProperties == null) {
+            return init(getMessagingNetworkProperties());
+        } else {
+            return init(kafkaProperties, getMessagingNetworkProperties());
+        }
     }
 
     /**
@@ -702,7 +754,9 @@ public final class IntegrationTestSupport {
 
         initRegistryClient();
         applicationClientFactory = IntegrationTestApplicationClientFactory.create(HonoConnection.newConnection(vertx, downstreamProps));
-        amqpApplicationClient = new ProtonBasedApplicationClient(HonoConnection.newConnection(vertx, downstreamProps));
+        final AmqpApplicationClient protonBasedApplicationClientFactory =
+                new ProtonBasedApplicationClient(HonoConnection.newConnection(vertx, downstreamProps));
+        applicationClient = protonBasedApplicationClientFactory;
 
         return CompositeFuture.all(
                 applicationClientFactory.connect()
@@ -710,7 +764,7 @@ public final class IntegrationTestSupport {
                         LOGGER.info("connected to AMQP Messaging Network using legacy client [{}:{}]",
                                 downstreamProps.getHost(), downstreamProps.getPort());
                     }),
-                amqpApplicationClient.connect()
+                protonBasedApplicationClientFactory.connect()
                     .onSuccess(ok -> {
                         LOGGER.info("connected to AMQP Messaging Network using new client [{}:{}]",
                                 downstreamProps.getHost(), downstreamProps.getPort());
@@ -719,14 +773,48 @@ public final class IntegrationTestSupport {
     }
 
     /**
+     * Connects to Kafka for telemetry and events and to the AMQP messaging network for commands.
+     * <p>
+     * Also creates an HTTP client for accessing the Device Registry.
+     *
+     * @param kafkaDownstreamProps The properties for connecting to Kafka.
+     * @param amqpDownstreamProps The properties for connecting to the AMQP Messaging
+     *                           Network.
+     * @return A future indicating the outcome of the operation.
+     */
+    public Future<?> init(final KafkaConsumerConfigProperties kafkaDownstreamProps, final ClientConfigProperties amqpDownstreamProps) {
+
+        initRegistryClient();
+
+        applicationClientFactory = IntegrationTestApplicationClientFactory.create(HonoConnection.newConnection(vertx, amqpDownstreamProps));
+        applicationClient = new KafkaApplicationClientImpl(vertx, kafkaDownstreamProps,
+                KafkaProducerFactory.sharedProducerFactory(vertx), getKafkaProducerConfig());
+
+        return applicationClientFactory.connect()
+                .onSuccess(con -> {
+                    LOGGER.info("connected to AMQP Messaging Network using legacy client [{}:{}]",
+                            amqpDownstreamProps.getHost(), amqpDownstreamProps.getPort());
+                });
+    }
+
+    /**
      * Creates an HTTP client for accessing the Device Registry.
      */
     public void initRegistryClient() {
-
-        registry = new DeviceRegistryHttpClient(
-                vertx,
-                IntegrationTestSupport.HONO_DEVICEREGISTRY_HOST,
-                IntegrationTestSupport.HONO_DEVICEREGISTRY_HTTP_PORT);
+        if (getKafkaConsumerConfig() != null) {
+            registry = new DeviceRegistryHttpClient(
+                    vertx,
+                    IntegrationTestSupport.HONO_DEVICEREGISTRY_HOST,
+                    IntegrationTestSupport.HONO_DEVICEREGISTRY_HTTP_PORT,
+                    Maps.of(TenantConstants.FIELD_EXT_MESSAGING_TYPE, (Object) MessagingType.kafka.name())
+                        .build()
+            );
+        } else {
+            registry = new DeviceRegistryHttpClient(
+                    vertx,
+                    IntegrationTestSupport.HONO_DEVICEREGISTRY_HOST,
+                    IntegrationTestSupport.HONO_DEVICEREGISTRY_HTTP_PORT);
+        }
     }
 
     /**
@@ -839,7 +927,13 @@ public final class IntegrationTestSupport {
         final Promise<Void> legacyClientResult = Promise.promise();
         applicationClientFactory.disconnect(legacyClientResult);
         final Promise<Void> newClientResult = Promise.promise();
-        amqpApplicationClient.disconnect(newClientResult);
+
+        if (applicationClient instanceof AmqpApplicationClient) {
+            ((AmqpApplicationClient) applicationClient).disconnect(newClientResult);
+        } else {
+            newClientResult.complete();
+        }
+
         return CompositeFuture.all(
                 legacyClientResult.future()
                     .onSuccess(ok -> LOGGER.info("legacy client's connection to AMQP Messaging Network closed")),
@@ -1345,7 +1439,7 @@ public final class IntegrationTestSupport {
             final String deviceId) {
 
         final Checkpoint messagesReceived = ctx.checkpoint(2);
-        return amqpApplicationClient.createEventConsumer(
+        return applicationClient.createEventConsumer(
                 tenantId,
                 msg -> {
                     ctx.verify(() -> {
@@ -1353,9 +1447,7 @@ public final class IntegrationTestSupport {
 
                         if (msg.getContentType().equals(EventConstants.CONTENT_TYPE_DEVICE_PROVISIONING_NOTIFICATION)) {
                             assertThat(msg.getTenantId()).isEqualTo(tenantId);
-                            final var rawMessage = msg.getMessageContext().getRawMessage();
-                            assertThat(MessageHelper.getRegistrationStatus(rawMessage))
-                                    .isEqualTo(EventConstants.RegistrationStatus.NEW.name());
+                            assertThat(getRegistrationStatus(msg)).isEqualTo(EventConstants.RegistrationStatus.NEW.name());
                             messagesReceived.flag();
                         } else {
                             messagesReceived.flag();
@@ -1363,7 +1455,7 @@ public final class IntegrationTestSupport {
                     });
                 },
                 close -> {})
-            .compose(ok -> amqpApplicationClient.createTelemetryConsumer(
+            .compose(ok -> applicationClient.createTelemetryConsumer(
                     tenantId,
                     msg -> {
                         ctx.verify(() -> {
@@ -1374,5 +1466,10 @@ public final class IntegrationTestSupport {
                     },
                     close -> {}))
             .mapEmpty();
+    }
+
+    private static String getRegistrationStatus(final DownstreamMessage msg) {
+        final MessageProperties properties = msg.getProperties();
+        return (String) properties.getPropertiesMap().get(MessageHelper.APP_PROPERTY_REGISTRATION_STATUS);
     }
 }

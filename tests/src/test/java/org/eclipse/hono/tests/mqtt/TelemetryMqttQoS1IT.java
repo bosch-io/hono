@@ -21,7 +21,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.eclipse.hono.application.client.DownstreamMessage;
 import org.eclipse.hono.application.client.MessageConsumer;
-import org.eclipse.hono.application.client.amqp.AmqpMessageContext;
+import org.eclipse.hono.application.client.MessageContext;
 import org.eclipse.hono.client.NoConsumerException;
 import org.eclipse.hono.client.ServiceInvocationException;
 import org.eclipse.hono.service.management.tenant.Tenant;
@@ -74,28 +74,35 @@ public class TelemetryMqttQoS1IT extends MqttPublishTestBase {
             final Map<String, String> topicPropertyBag,
             final long publishCompletionTimeout) {
 
-        final String topic = String.format(
-                TOPIC_TEMPLATE,
-                useShortTopicName ? TelemetryConstants.TELEMETRY_ENDPOINT_SHORT : TelemetryConstants.TELEMETRY_ENDPOINT,
-                tenantId,
-                deviceId);
         final Promise<Integer> result = Promise.promise();
-        mqttClient.publish(
-                getTopicWithPropertyBag(topic, topicPropertyBag),
-                payload,
-                getQos(),
-                false, // is duplicate
-                false, // is retained
-                sendAttempt -> handlePublishAttempt(sendAttempt, result, publishCompletionTimeout));
-        return result.future();
+        try {
+            final String topic = String.format(
+                    TOPIC_TEMPLATE,
+                    useShortTopicName ? TelemetryConstants.TELEMETRY_ENDPOINT_SHORT : TelemetryConstants.TELEMETRY_ENDPOINT,
+                    tenantId,
+                    deviceId);
+            mqttClient.publish(
+                    getTopicWithPropertyBag(topic, topicPropertyBag),
+                    payload,
+                    getQos(),
+                    false, // is duplicate
+                    false, // is retained
+                    sendAttempt -> handlePublishAttempt(sendAttempt, result, publishCompletionTimeout));
+        } catch (Exception e) {
+            LOGGER.warn(String.format("Unhandled exception when publishing message %s", payload.toString()), e);
+            result.fail(e);
+        } finally {
+            return result.future();
+        }
     }
 
     @Override
     protected Future<MessageConsumer> createConsumer(
             final String tenantId,
-            final Handler<DownstreamMessage<AmqpMessageContext>> messageConsumer) {
+            final Handler<DownstreamMessage<? extends MessageContext>> messageConsumer) {
 
-        return helper.amqpApplicationClient.createTelemetryConsumer(tenantId, messageConsumer, remoteClose -> {});
+        return helper.applicationClient
+                .createTelemetryConsumer(tenantId, (Handler) messageConsumer, remoteClose -> {});
     }
 
     /**
