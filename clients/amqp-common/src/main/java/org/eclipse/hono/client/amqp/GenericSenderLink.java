@@ -273,6 +273,40 @@ public class GenericSenderLink extends AbstractHonoClient {
      * Sends an AMQP 1.0 message to the endpoint configured for this link and waits for the
      * disposition indicating the outcome of the transfer.
      * <p>
+     * A not-accepted outcome will cause the returned future to be failed.
+     *
+     * @param message The message to send.
+     * @param sendMessageTimeout The maximum number of milliseconds to wait.
+     * @param currentSpan The <em>OpenTracing</em> span used to trace the sending of the message.
+     *              The span will be finished by this method and will contain an error log if
+     *              the message has not been accepted by the peer.
+     * @return A future indicating the outcome of the operation.
+     *         <p>
+     *         The future will be succeeded if the message has been accepted (and settled)
+     *         by the peer.
+     *         <p>
+     *         The future will be failed with a {@link ServerErrorException} if the message
+     *         could not be sent due to a lack of credit.
+     *         If a message is sent which cannot be processed by the peer, the future will
+     *         be failed with either a {@link ServerErrorException} or a {@link ClientErrorException}
+     *         depending on the reason for the failure to process the message.
+     *         If no delivery update was received from the peer within the configured timeout period
+     *         (see {@link ClientConfigProperties#getSendMessageTimeout()}), the future will
+     *         be failed with a {@link ServerErrorException}.
+     * @throws NullPointerException if any of the parameters are {@code null}.
+     * @throws IllegalArgumentException if the sendMessageTimeout value is &lt; 0
+     */
+    public Future<ProtonDelivery> sendAndWaitForOutcome(final Message message, final long sendMessageTimeout,
+            final Span currentSpan) {
+
+        return checkForCreditAndSend(message, currentSpan,
+                () -> sendMessageAndWaitForOutcome(message, sendMessageTimeout, currentSpan, true));
+    }
+
+    /**
+     * Sends an AMQP 1.0 message to the endpoint configured for this link and waits for the
+     * disposition indicating the outcome of the transfer.
+     * <p>
      * A not-accepted outcome will be returned in a succeeded future result.
      *
      * @param message The message to send.
@@ -397,8 +431,19 @@ public class GenericSenderLink extends AbstractHonoClient {
     private Future<ProtonDelivery> sendMessageAndWaitForOutcome(final Message message, final Span currentSpan,
             final boolean mapUnacceptedOutcomeToErrorResult) {
 
+        return sendMessageAndWaitForOutcome(message, connection.getConfig().getSendMessageTimeout(), currentSpan,
+                mapUnacceptedOutcomeToErrorResult);
+    }
+
+    private Future<ProtonDelivery> sendMessageAndWaitForOutcome(final Message message, final long sendMessageTimeout,
+            final Span currentSpan, final boolean mapUnacceptedOutcomeToErrorResult) {
+
         Objects.requireNonNull(message);
         Objects.requireNonNull(currentSpan);
+
+        if (sendMessageTimeout < 0) {
+            throw new IllegalArgumentException("send message timeout must be >= 0");
+        }
 
         final AtomicReference<ProtonDelivery> deliveryRef = new AtomicReference<>();
         final Promise<ProtonDelivery> result = Promise.promise();
@@ -408,11 +453,10 @@ public class GenericSenderLink extends AbstractHonoClient {
 
         final SendMessageSampler.Sample sample = sampler.start(tenantId);
 
-        final ClientConfigProperties config = connection.getConfig();
-        final Long timerId = config.getSendMessageTimeout() > 0
-                ? connection.getVertx().setTimer(config.getSendMessageTimeout(), id -> {
+        final Long timerId = sendMessageTimeout > 0
+                ? connection.getVertx().setTimer(sendMessageTimeout, id -> {
                     if (!result.future().isComplete()) {
-                        handleSendMessageTimeout(message, config.getSendMessageTimeout(), deliveryRef.get(), sample,
+                        handleSendMessageTimeout(message, sendMessageTimeout, deliveryRef.get(), sample,
                                 result, null);
                     }
                 })

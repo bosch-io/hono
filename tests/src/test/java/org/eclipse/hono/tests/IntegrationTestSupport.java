@@ -66,6 +66,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
+import io.opentracing.noop.NoopSpan;
 import io.vertx.core.CompositeFuture;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
@@ -1070,28 +1071,16 @@ public final class IntegrationTestSupport {
             final Map<String, Object> properties,
             final long requestTimeout) {
 
-        return applicationClientFactory.getOrCreateCommandClient(tenantId).compose(commandClient -> {
-
-            commandClient.setRequestTimeout(requestTimeout);
-            final Promise<Void> result = Promise.promise();
-            final Handler<Void> send = s -> {
-                // send the command upstream to the device
-                LOGGER.trace("sending one-way command [name: {}, contentType: {}, payload: {}]", command, contentType, payload);
-                commandClient.sendOneWayCommand(deviceId, command, contentType, payload, properties).map(ok -> {
+        // send the one way command upstream to the device
+        return amqpApplicationClient.sendOneWayCommand(tenantId, deviceId, command, contentType, payload, properties,
+                requestTimeout, NoopSpan.INSTANCE.context())
+                .map(ok -> {
                     LOGGER.debug("successfully sent one-way command [name: {}, payload: {}]", command, payload);
                     return (Void) null;
                 }).recover(t -> {
                     LOGGER.debug("could not send one-way command: {}", t.getMessage());
                     return Future.failedFuture(t);
-                }).onComplete(result);
-            };
-            if (commandClient.getCredit() == 0) {
-                commandClient.sendQueueDrainHandler(send);
-            } else {
-                send.handle(null);
-            }
-            return result.future();
-        });
+                });
     }
 
     /**

@@ -14,6 +14,7 @@ package org.eclipse.hono.application.client.kafka.impl;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -22,6 +23,8 @@ import java.util.stream.Stream;
 import org.apache.kafka.clients.consumer.MockConsumer;
 import org.apache.kafka.clients.consumer.OffsetResetStrategy;
 import org.apache.kafka.clients.producer.MockProducer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.header.internals.RecordHeader;
 import org.eclipse.hono.application.client.DownstreamMessage;
 import org.eclipse.hono.application.client.MessageConsumer;
 import org.eclipse.hono.application.client.kafka.KafkaMessageContext;
@@ -30,12 +33,15 @@ import org.eclipse.hono.client.kafka.HonoTopic.Type;
 import org.eclipse.hono.client.kafka.KafkaProducerConfigProperties;
 import org.eclipse.hono.client.kafka.consumer.KafkaConsumerConfigProperties;
 import org.eclipse.hono.kafka.test.KafkaClientUnitTestHelper;
+import org.eclipse.hono.util.MessageHelper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import io.opentracing.noop.NoopSpan;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
@@ -54,6 +60,7 @@ public class KafkaApplicationClientImplTest {
     private static final String PARAMETERIZED_TEST_NAME_PATTERN = "{displayName} [{index}]; parameters: {argumentsWithNames}";
     private KafkaApplicationClientImpl client;
     private MockConsumer<String, Buffer> mockConsumer;
+    private MockProducer<String, Buffer> mockProducer;
     private String tenantId;
 
     static Stream<Type> messageTypes() {
@@ -71,21 +78,23 @@ public class KafkaApplicationClientImplTest {
      */
     @BeforeEach
     void setUp(final Vertx vertx) {
-        final KafkaProducerConfigProperties producerConfig = new KafkaProducerConfigProperties();
-        final MockProducer<String, Buffer> mockProducer = KafkaClientUnitTestHelper.newMockProducer(true);
-        final CachingKafkaProducerFactory<String, Buffer> producerFactory = KafkaClientUnitTestHelper
-                .newProducerFactory(mockProducer);
+        final KafkaConsumerConfigProperties consumerConfig;
+        final KafkaProducerConfigProperties producerConfig;
+        final CachingKafkaProducerFactory<String, Buffer> producerFactory;
 
-        tenantId = UUID.randomUUID().toString();
-
+        consumerConfig = new KafkaConsumerConfigProperties();
+        consumerConfig.setConsumerConfig(Map.of("client.id", "application-test-consumer"));
         mockConsumer = new MockConsumer<>(OffsetResetStrategy.EARLIEST);
 
-        final KafkaConsumerConfigProperties consumerConfig = new KafkaConsumerConfigProperties();
-        consumerConfig.setConsumerConfig(Map.of("client.id", "application-test-consumer"));
+        producerConfig = new KafkaProducerConfigProperties();
         producerConfig.setProducerConfig(Map.of("client.id", "application-test-sender"));
+        mockProducer = KafkaClientUnitTestHelper.newMockProducer(true);
+        producerFactory = KafkaClientUnitTestHelper.newProducerFactory(mockProducer);
 
         client = new KafkaApplicationClientImpl(vertx, consumerConfig, producerFactory, producerConfig);
         client.setKafkaConsumerFactory(() -> KafkaConsumer.create(vertx, mockConsumer));
+
+        tenantId = UUID.randomUUID().toString();
     }
 
     /**
@@ -134,6 +143,65 @@ public class KafkaApplicationClientImplTest {
                     assertThat(mockConsumer.closed()).isTrue();
                     ctx.completeNow();
                 })));
+    }
+
+    /**
+     * Verifies that a one-way command sent to a device succeeds.
+     *
+     * @param ctx The vert.x test context.
+     */
+    @Test
+    public void testSendOneWayCommandSucceeds(final VertxTestContext ctx) {
+        final Map<String, Object> headerProperties = new HashMap<>();
+        final String deviceId = UUID.randomUUID().toString();
+        final String subject = "setVolume";
+        headerProperties.put("appKey", "appValue");
+
+        client.sendOneWayCommand(tenantId, deviceId, subject, null, Buffer.buffer("{\"value\": 20}"), headerProperties,
+                NoopSpan.INSTANCE.context())
+                .onComplete(ctx.succeeding(ok -> {
+                    ctx.verify(() -> {
+                        final ProducerRecord<String, Buffer> commandRecord = mockProducer.history().get(0);
+                        assertThat(commandRecord.key()).isEqualTo(deviceId);
+                        assertThat(commandRecord.headers()).containsOnlyOnce(
+                                new RecordHeader(MessageHelper.SYS_PROPERTY_SUBJECT, subject.getBytes()));
+                        assertThat(commandRecord.headers()).containsOnlyOnce(
+                                new RecordHeader("appKey", "appValue".getBytes()));
+                    });
+                    client.stop();
+                    ctx.completeNow();
+                }));
+    }
+
+    /**
+     * Verifies that a command sent asynchronously to a device succeeds.
+     *
+     * @param ctx The vert.x test context.
+     */
+    @Test
+    public void testSendAsyncCommandSucceeds(final VertxTestContext ctx) {
+        final Map<String, Object> headerProperties = new HashMap<>();
+        final String deviceId = UUID.randomUUID().toString();
+        final String correlationId = UUID.randomUUID().toString();
+        final String subject = "setVolume";
+        headerProperties.put("appKey", "appValue");
+
+        client.sendAsyncCommand(tenantId, deviceId, subject, null, Buffer.buffer("{\"value\": 20}"), correlationId,
+                null, headerProperties, NoopSpan.INSTANCE.context())
+                .onComplete(ctx.succeeding(ok -> {
+                    ctx.verify(() -> {
+                        final ProducerRecord<String, Buffer> commandRecord = mockProducer.history().get(0);
+                        assertThat(commandRecord.key()).isEqualTo(deviceId);
+                        assertThat(commandRecord.headers()).containsOnlyOnce(
+                                new RecordHeader(MessageHelper.SYS_PROPERTY_SUBJECT, subject.getBytes()));
+                        assertThat(commandRecord.headers()).containsOnlyOnce(
+                                new RecordHeader(MessageHelper.SYS_PROPERTY_CORRELATION_ID, correlationId.getBytes()));
+                        assertThat(commandRecord.headers()).containsOnlyOnce(
+                                new RecordHeader("appKey", "appValue".getBytes()));
+                    });
+                    client.stop();
+                    ctx.completeNow();
+                }));
     }
 
     private Future<MessageConsumer> createConsumer(final String tenantId, final Type type,
