@@ -16,11 +16,13 @@ package org.eclipse.hono.deviceregistry.file;
 
 import org.eclipse.hono.adapter.client.telemetry.EventSender;
 import org.eclipse.hono.adapter.client.telemetry.amqp.ProtonBasedDownstreamSender;
+import org.eclipse.hono.adapter.spring.AbstractMessagingClientConfig;
 import org.eclipse.hono.auth.HonoPasswordEncoder;
 import org.eclipse.hono.auth.SpringBasedHonoPasswordEncoder;
 import org.eclipse.hono.client.HonoConnection;
 import org.eclipse.hono.client.SendMessageSampler;
 import org.eclipse.hono.config.ClientConfigProperties;
+import org.eclipse.hono.config.ProtocolAdapterProperties;
 import org.eclipse.hono.config.ServiceConfigProperties;
 import org.eclipse.hono.deviceregistry.server.DeviceRegistryHttpServer;
 import org.eclipse.hono.deviceregistry.service.device.AutoProvisioner;
@@ -61,7 +63,7 @@ import io.vertx.core.Vertx;
  */
 @Configuration
 @ConditionalOnProperty(name = "hono.app.type", havingValue = "file", matchIfMissing = true)
-public class FileBasedServiceConfig {
+public class FileBasedServiceConfig extends AbstractMessagingClientConfig {
 
     @Autowired
     private Vertx vertx;
@@ -206,6 +208,11 @@ public class FileBasedServiceConfig {
         return new AutoProvisionerConfigProperties();
     }
 
+    @Override
+    protected String getAdapterName() {
+        return "device-registry";
+    }
+
     /**
      * Creates an instance of the file based service for managing device registration information
      * and credentials.
@@ -226,7 +233,7 @@ public class FileBasedServiceConfig {
         autoProvisioner.setVertx(vertx);
         autoProvisioner.setTracer(tracer);
         autoProvisioner.setTenantInformationService(tenantInformationService);
-        autoProvisioner.setEventSender(eventSender());
+        autoProvisioner.setMessagingClients(messagingClients(SendMessageSampler.Factory.noop(), tracer, vertx, new ProtocolAdapterProperties()));
         autoProvisioner.setConfig(autoProvisionerConfigProperties());
 
         registrationService.setAutoProvisioner(autoProvisioner);

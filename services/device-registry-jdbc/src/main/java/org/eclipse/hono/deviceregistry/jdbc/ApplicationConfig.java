@@ -18,12 +18,14 @@ import java.util.Optional;
 
 import org.eclipse.hono.adapter.client.telemetry.EventSender;
 import org.eclipse.hono.adapter.client.telemetry.amqp.ProtonBasedDownstreamSender;
+import org.eclipse.hono.adapter.spring.AbstractMessagingClientConfig;
 import org.eclipse.hono.auth.HonoPasswordEncoder;
 import org.eclipse.hono.auth.SpringBasedHonoPasswordEncoder;
 import org.eclipse.hono.client.HonoConnection;
 import org.eclipse.hono.client.SendMessageSampler;
 import org.eclipse.hono.config.ApplicationConfigProperties;
 import org.eclipse.hono.config.ClientConfigProperties;
+import org.eclipse.hono.config.ProtocolAdapterProperties;
 import org.eclipse.hono.config.ServerConfig;
 import org.eclipse.hono.config.ServiceConfigProperties;
 import org.eclipse.hono.config.VertxProperties;
@@ -98,7 +100,7 @@ import io.vertx.ext.web.handler.BasicAuthHandler;
  */
 @Configuration
 @Import(PrometheusSupport.class)
-public class ApplicationConfig {
+public class ApplicationConfig extends AbstractMessagingClientConfig {
 
     private static final String BEAN_NAME_AMQP_SERVER = "amqpServer";
     private static final String BEAN_NAME_HTTP_SERVER = "httpServer";
@@ -401,6 +403,11 @@ public class ApplicationConfig {
         return new AutoProvisionerConfigProperties();
     }
 
+    @Override
+    protected String getAdapterName() {
+        return "device-registry";
+    }
+
     /**
      * Provide a registration service.
      *
@@ -418,10 +425,11 @@ public class ApplicationConfig {
         final var tenantInformationService = new AutowiredTenantInformationService();
         tenantInformationService.setService(tenantService());
 
+        final Tracer tracer = tracer();
         autoProvisioner.setDeviceManagementService(registrationManagementService());
         autoProvisioner.setVertx(vertx());
-        autoProvisioner.setTracer(tracer());
-        autoProvisioner.setEventSender(eventSender());
+        autoProvisioner.setTracer(tracer);
+        autoProvisioner.setMessagingClients(messagingClients(SendMessageSampler.Factory.noop(), tracer, vertx(), new ProtocolAdapterProperties()));
         autoProvisioner.setConfig(autoProvisionerConfigProperties());
         autoProvisioner.setTenantInformationService(tenantInformationService);
         registrationService.setAutoProvisioner(autoProvisioner);
